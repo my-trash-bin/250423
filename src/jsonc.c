@@ -1,5 +1,7 @@
 #include "jsonc.h"
 
+#define _CRT_SECURE_NO_WARNINGS
+
 #ifdef __cplusplus
 
 #include <cctype>
@@ -16,8 +18,6 @@
 #include <string.h>
 
 #endif
-
-typedef bool err_t;
 
 typedef struct arraybuffer {
   void *data;
@@ -50,11 +50,6 @@ static inline void arraybuffer_destroy(arraybuffer *buffer) {
 
 static inline void *arraybuffer_get(arraybuffer *buffer, size_t index) {
   return (char *)buffer->data + index * buffer->element_size;
-}
-
-static inline void arraybuffer_set(arraybuffer *buffer, size_t index,
-                                   const void *value) {
-  memcpy(arraybuffer_get(buffer, index), value, buffer->element_size);
 }
 
 static inline err_t arraybuffer_push(arraybuffer *buffer, const void *value) {
@@ -414,12 +409,12 @@ static err_t ts_string_backslash(char c, arraybuffer *list,
 
 static unsigned char from_hex(char c) {
   if ('0' <= c && c <= '9')
-    return (c - '0');
+    return c - '0';
   if ('a' <= c && c <= 'f')
-    return (c - 'a' + 10);
+    return c - 'a' + 10;
   if ('A' <= c && c <= 'F')
-    return (c - 'A' + 10);
-  return (-1);
+    return c - 'A' + 10;
+  return -1;
 }
 
 static err_t ts_string_x0(char c, arraybuffer *list, tokenizer_state_data *data,
@@ -634,25 +629,21 @@ static err_t tokenize(const char *str, arraybuffer **out) {
     if (state_functions[current_state.state](
             str[i], tokens, &current_state.data, &current_state)) {
       tokenize_free(tokens);
-      return (true);
+      return true;
     }
   }
   if (current_state.state == TS_ERROR) {
     tokenize_free(tokens);
     *out = NULL;
-    return (false);
+    return false;
   }
   *out = tokens;
-  return (false);
+  return false;
 }
 
 static token token_get(arraybuffer *tokens, size_t index) {
   return *((token *)arraybuffer_get(tokens, index));
 }
-
-static err_t parse_array(arraybuffer *list, size_t *index, jsonc_array *out);
-static err_t parse_object(arraybuffer *list, size_t *index, jsonc_object *out);
-static err_t parse_value(arraybuffer *list, size_t *index, jsonc_value *out);
 
 static bool parse_next_is_array(token_type type) {
   return type == TT_LEFT_BRACKET;
@@ -668,32 +659,248 @@ static bool parse_next_is_value(token_type type) {
          parse_next_is_object(type);
 }
 
-static err_t parse_array(arraybuffer *list, size_t *index, jsonc_array *out) {
-  // TODO: implement
+static void free_array(jsonc_array array);
+static void free_object(jsonc_object object);
+static void free_value(jsonc_value value);
+
+static void free_array(jsonc_array array) {
+  for (size_t i = 0; i < array.count; i++) {
+    free_value(array.values[i]);
+  }
+  free(array.values);
+}
+
+static void free_object(jsonc_object object) {
+  for (size_t i = 0; i < object.count; i++) {
+    free_value(object.entries[i].value);
+    free(object.entries[i].key);
+  }
+  free(object.entries);
+}
+
+static void free_value(jsonc_value value) {
+  if (value.type == JSONC_VALUE_TYPE_ARRAY) {
+    free_array(value.value.array);
+  } else if (value.type == JSONC_VALUE_TYPE_OBJECT) {
+    free_object(value.value.object);
+  } else if (value.type == JSONC_VALUE_TYPE_STRING) {
+    free(value.value.string);
+  }
+}
+
+static err_t parse_array(arraybuffer *list, size_t *index, jsonc_array *out,
+                         bool *out_is_error);
+static err_t parse_object(arraybuffer *list, size_t *index, jsonc_object *out,
+                          bool *out_is_error);
+static err_t parse_value(arraybuffer *list, size_t *index, jsonc_value *out,
+                         bool *out_is_error);
+
+static err_t parse_array(arraybuffer *list, size_t *index, jsonc_array *out,
+                         bool *out_is_error) {
+  (*index)++;
+  if (token_get(list, *index).type == TT_RIGHT_BRACKET) {
+    out->count = 0;
+    out->values = NULL;
+    (*index)++;
+    return false;
+  }
+  jsonc_value first;
+  bool is_error;
+  if (parse_value(list, index, &first, &is_error)) {
+    return true;
+  }
+  if (is_error) {
+    *out_is_error = true;
+    return false;
+  }
+  arraybuffer *const values = arraybuffer_create(sizeof(jsonc_value), 4);
+  if (!values) {
+    free_value(first);
+    return true;
+  }
+  if (arraybuffer_push(values, &first)) {
+    free_value(first);
+    goto fail;
+  }
+  while (token_get(list, *index).type == TT_COMMA) {
+    (*index)++;
+    jsonc_value value;
+    if (parse_value(list, index, &value, &is_error)) {
+      goto fail;
+    }
+    if (is_error) {
+      goto error;
+    }
+    if (arraybuffer_push(values, &value)) {
+      free_value(value);
+      goto fail;
+    }
+  }
+  if (token_get(list, *index).type != TT_RIGHT_BRACKET) {
+    goto error;
+  }
+  (*index)++;
+  out->count = values->length;
+  out->values = malloc(sizeof(jsonc_value) * out->count);
+  if (!out->values) {
+    goto fail;
+  }
+  for (size_t i = 0; i < out->count; i++) {
+    out->values[i] = *((jsonc_value *)arraybuffer_get(values, i));
+  }
+  arraybuffer_destroy(values);
+  *out_is_error = false;
+  return false;
+
+fail:
+  for (size_t i = 0; i < values->length; i++) {
+    jsonc_value *value = arraybuffer_get(values, i);
+    free_value(*value);
+  }
+  arraybuffer_destroy(values);
+  return true;
+
+error:
+  for (size_t i = 0; i < values->length; i++) {
+    jsonc_value *value = arraybuffer_get(values, i);
+    free_value(*value);
+  }
+  arraybuffer_destroy(values);
+  *out_is_error = true;
   return false;
 }
 
-static err_t parse_object(arraybuffer *list, size_t *index, jsonc_object *out) {
-  // TODO: implement
+static err_t parse_object(arraybuffer *list, size_t *index, jsonc_object *out,
+                          bool *out_is_error) {
+  (*index)++;
+  if (token_get(list, *index).type == TT_RIGHT_BRACE) {
+    out->count = 0;
+    out->entries = NULL;
+    (*index)++;
+    return false;
+  }
+  jsonc_object_entry first;
+  if (token_get(list, *index).type != TT_STRING) {
+    *out_is_error = true;
+    return false;
+  }
+  first.key = util_strdup(token_get(list, *index).value.string);
+  if (!first.key) {
+    return true;
+  }
+  (*index)++;
+  if (token_get(list, *index).type != TT_COLON) {
+    free(first.key);
+    *out_is_error = true;
+    return false;
+  }
+  (*index)++;
+  bool is_error;
+  if (parse_value(list, index, &first.value, &is_error)) {
+    return true;
+  }
+  if (is_error) {
+    *out_is_error = true;
+    free(first.key);
+    return false;
+  }
+  arraybuffer *const entries =
+      arraybuffer_create(sizeof(jsonc_object_entry), 4);
+  if (!entries) {
+    free_value(first.value);
+    free(first.key);
+    return true;
+  }
+  if (arraybuffer_push(entries, &first)) {
+    free_value(first.value);
+    free(first.key);
+    goto fail;
+  }
+  while (token_get(list, *index).type == TT_COMMA) {
+    (*index)++;
+    if (token_get(list, *index).type != TT_STRING) {
+      goto error;
+    }
+    jsonc_object_entry entry;
+    entry.key = util_strdup(token_get(list, *index).value.string);
+    if (!entry.key) {
+      goto fail;
+    }
+    (*index)++;
+    if (token_get(list, *index).type != TT_COLON) {
+      free(entry.key);
+      goto error;
+    }
+    (*index)++;
+    if (parse_value(list, index, &entry.value, &is_error)) {
+      free(entry.key);
+      goto fail;
+    }
+    if (is_error) {
+      free(entry.key);
+      goto error;
+    }
+    if (arraybuffer_push(entries, &entry)) {
+      free_value(entry.value);
+      free(entry.key);
+      goto fail;
+    }
+  }
+  if (token_get(list, *index).type != TT_RIGHT_BRACE) {
+    goto error;
+  }
+  (*index)++;
+  out->count = entries->length;
+  out->entries = malloc(sizeof(jsonc_object_entry) * out->count);
+  if (!out->entries) {
+    goto fail;
+  }
+  for (size_t i = 0; i < out->count; i++) {
+    out->entries[i] = *((jsonc_object_entry *)arraybuffer_get(entries, i));
+  }
+  arraybuffer_destroy(entries);
+  *out_is_error = false;
+  return false;
+
+fail:
+  for (size_t i = 0; i < entries->length; i++) {
+    jsonc_object_entry *entry = arraybuffer_get(entries, i);
+    free_value(entry->value);
+    free(entry->key);
+  }
+  arraybuffer_destroy(entries);
+  return true;
+
+error:
+  for (size_t i = 0; i < entries->length; i++) {
+    jsonc_object_entry *entry = arraybuffer_get(entries, i);
+    free_value(entry->value);
+    free(entry->key);
+  }
+  arraybuffer_destroy(entries);
+  *out_is_error = true;
   return false;
 }
 
-static err_t parse_value(arraybuffer *list, size_t *index, jsonc_value *out) {
+static err_t parse_value(arraybuffer *list, size_t *index, jsonc_value *out,
+                         bool *out_is_error) {
   if (!parse_next_is_value(token_get(list, *index).type)) {
-    out->type = JSONC_VALUE_TYPE_ERROR;
+    *out_is_error = true;
     return false;
   } else if (parse_next_is_array(token_get(list, *index).type)) {
-    return parse_array(list, index, out);
+    out->type = JSONC_VALUE_TYPE_ARRAY;
+    return parse_array(list, index, &out->value.array, out_is_error);
   } else if (parse_next_is_object(token_get(list, *index).type)) {
-    return parse_object(list, index, out);
+    out->type = JSONC_VALUE_TYPE_OBJECT;
+    return parse_object(list, index, &out->value.object, out_is_error);
   } else {
     err_t result;
 
     result = false;
-    if (token_get(list, *index).type == TT_NULL)
+    if (token_get(list, *index).type == TT_NULL) {
       out->type = JSONC_VALUE_TYPE_NULL;
-    else if (token_get(list, *index).type == TT_TRUE ||
-             token_get(list, *index).type == TT_FALSE) {
+    } else if (token_get(list, *index).type == TT_TRUE ||
+               token_get(list, *index).type == TT_FALSE) {
       out->type = JSONC_VALUE_TYPE_BOOLEAN;
       out->value.boolean = token_get(list, *index).type == TT_TRUE;
     } else if (token_get(list, *index).type == TT_NUMBER) {
@@ -704,9 +911,35 @@ static err_t parse_value(arraybuffer *list, size_t *index, jsonc_value *out) {
       out->value.string = util_strdup(token_get(list, *index).value.string);
       result = !out->value.string;
     } else {
-      return true;
+      *out_is_error = true;
+      return false;
     }
     (*index)++;
-    return (result);
+    return result;
   }
 }
+
+err_t jsonc_parse(const char *source, jsonc_value *out, bool *out_is_error) {
+  arraybuffer *tokens;
+  if (tokenize(source, &tokens)) {
+    return true;
+  }
+  if (!tokens) {
+    *out_is_error = true;
+    return false;
+  }
+  size_t index = 0;
+  if (parse_value(tokens, &index, out, out_is_error)) {
+    tokenize_free(tokens);
+    return true;
+  }
+  if ((*out_is_error = token_get(tokens, index).type != TT_EOF)) {
+    free_value(*out);
+    tokenize_free(tokens);
+    return false;
+  }
+  tokenize_free(tokens);
+  return false;
+}
+
+void jsonc_free(jsonc_value value) { free_value(value); }

@@ -1,4 +1,4 @@
 # temporary files
 .cache
 compile_commands.json
-builddirs
+builddir

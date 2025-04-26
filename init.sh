@@ -5,7 +5,7 @@ set -e
 cd "$(dirname "$0")"
 
 PWD_ESCAPED="$(
-  (command -v cmd >/dev/null 2>&1 &&  powershell -NoProfile -Command 'cmd /c cd' || pwd) \
+  (command -v cmd >/dev/null 2>&1 && powershell -NoProfile -Command 'cmd /c cd' || pwd) \
     | sed 's#\\#\\\\#g'
 )"
 
