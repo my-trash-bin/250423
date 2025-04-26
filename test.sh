@@ -8,4 +8,4 @@ cmake -B builddir -DCMAKE_INSTALL_PREFIX=builddir/out test
 cmake --build builddir --config Debug
 cmake --install builddir --config Debug
 
-builddir/out/bin/jsonc test/data/00-basic.json | diff test/data/00-basic.json -
+builddir/out/bin/jsonc test/data/00-basic.json | tr -d '\r' | diff test/data/00-basic.json -
