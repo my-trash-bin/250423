@@ -171,7 +171,7 @@ static err_t add_number_token(arraybuffer *list,
       exponential(state->value * state->sign, state->exp * state->exp_sign);
   const token current = {.type = TT_NUMBER, .value.number = number};
 
-  if (!arraybuffer_push(list, &current)) {
+  if (arraybuffer_push(list, &current)) {
     return true;
   }
   return false;
@@ -180,8 +180,12 @@ static err_t add_number_token(arraybuffer *list,
 static err_t add_string_token(arraybuffer *list,
                               /* always-consumed */
                               tokenizer_state_string *state) {
-  char *const string = util_strdup(arraybuffer_get(state->stringbuilder, 0));
+  static const char null_byte = '\0';
   err_t result = true;
+  if (arraybuffer_push(state->stringbuilder, &null_byte)) {
+    goto cleanup;
+  }
+  char *const string = util_strdup(arraybuffer_get(state->stringbuilder, 0));
   if (!string) {
     goto cleanup;
   }
@@ -195,7 +199,6 @@ static err_t add_string_token(arraybuffer *list,
 
 cleanup:
   arraybuffer_destroy(state->stringbuilder);
-  state->stringbuilder = NULL;
   return result;
 }
 
@@ -626,8 +629,9 @@ static err_t tokenize(const char *str, arraybuffer **out) {
   arraybuffer *tokens = arraybuffer_create(sizeof(token), 128);
   size_t i = -1;
   while (current_state.state != TS_ERROR && (i++ == (size_t)-1 || str[i - 1])) {
-    if (state_functions[current_state.state](
-            str[i], tokens, &current_state.data, &current_state)) {
+    tokenizer_state_data data = current_state.data;
+    if (state_functions[current_state.state](str[i], tokens, &data,
+                                             &current_state)) {
       tokenize_free(tokens);
       return true;
     }
@@ -915,9 +919,14 @@ static err_t parse_value(arraybuffer *list, size_t *index, jsonc_value *out,
       return false;
     }
     (*index)++;
+    *out_is_error = false;
     return result;
   }
 }
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 err_t jsonc_parse(const char *source, jsonc_value *out, bool *out_is_error) {
   arraybuffer *tokens;
@@ -933,6 +942,10 @@ err_t jsonc_parse(const char *source, jsonc_value *out, bool *out_is_error) {
     tokenize_free(tokens);
     return true;
   }
+  if (*out_is_error) {
+    tokenize_free(tokens);
+    return false;
+  }
   if ((*out_is_error = token_get(tokens, index).type != TT_EOF)) {
     free_value(*out);
     tokenize_free(tokens);
@@ -943,3 +956,7 @@ err_t jsonc_parse(const char *source, jsonc_value *out, bool *out_is_error) {
 }
 
 void jsonc_free(jsonc_value value) { free_value(value); }
+
+#ifdef __cplusplus
+}
+#endif

@@ -51,7 +51,7 @@ static void print_array(const jsonc_array &array) {
 static void print_object(const jsonc_object &object) {
   std::cout << "{";
   for (size_t i = 0; i < object.count; i++) {
-    std::cout << object.entries[i].key << ":";
+    std::cout << "\"" << object.entries[i].key << "\"" << ":";
     print_value(object.entries[i].value);
     if (i <object.count - 1) {
       std::cout << ",";

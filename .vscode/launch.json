@@ -1,0 +1,13 @@
+{
+  "configurations": [
+    {
+      "name": "(Windows) Launch",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/builddir/out/bin/jsonc",
+      "args": ["test/data/00-basic.json"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+    }
+  ]
+}
