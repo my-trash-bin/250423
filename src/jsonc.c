@@ -125,6 +125,10 @@ typedef struct token {
 #define TS_NUMBER_E 20
 #define TS_NUMBER_E_SIGN 21
 #define TS_NUMBER_E_DIGIT 22
+#define TS_SLASH 23
+#define TS_SINGLE_LINE_COMMENT 24
+#define TS_MULTI_LINE_COMMENT 25
+#define TS_MULTI_LINE_COMMENT_STAR 26
 
 typedef struct tokenizer_state_string {
   arraybuffer *stringbuilder;
@@ -229,6 +233,8 @@ static err_t ts_default(char c, arraybuffer *list, tokenizer_state_data *data,
     *out_next_state = (tokenizer_state){.state = TS_KEYWORD_N};
   } else if (c == ' ' || c == '\n' || c == '\r' || c == '\t') {
     *out_next_state = (tokenizer_state){.state = TS_DEFAULT};
+  } else if (c == '/') {
+    *out_next_state = (tokenizer_state){.state = TS_SLASH};
   } else if (c == '-' || ('0' <= c && c <= '9')) {
     out_next_state->data.number.current_digit = 1;
     out_next_state->data.number.value = 0;
@@ -486,7 +492,6 @@ static err_t ts_number_zero(char c, arraybuffer *list,
   if (add_number_token(list, &data->number)) {
     return true;
   }
-  *out_next_state = (tokenizer_state){.state = TS_DEFAULT};
   return ts_default(c, list, data, out_next_state);
 }
 
@@ -509,7 +514,6 @@ static err_t ts_number_integer(char c, arraybuffer *list,
   if (add_number_token(list, &data->number)) {
     return true;
   }
-  *out_next_state = (tokenizer_state){.state = TS_DEFAULT};
   return ts_default(c, list, data, out_next_state);
 }
 
@@ -546,7 +550,6 @@ static err_t ts_number_fraction(char c, arraybuffer *list,
   if (add_number_token(list, &data->number)) {
     return true;
   }
-  *out_next_state = (tokenizer_state){.state = TS_DEFAULT};
   return ts_default(c, list, data, out_next_state);
 }
 
@@ -599,19 +602,96 @@ static err_t ts_number_e_digit(char c, arraybuffer *list,
   if (add_number_token(list, &data->number)) {
     return true;
   }
-  *out_next_state = (tokenizer_state){.state = TS_DEFAULT};
   return ts_default(c, list, data, out_next_state);
 }
 
+static err_t ts_slash(char c, arraybuffer *list, tokenizer_state_data *data,
+                      tokenizer_state *out_next_state) {
+  (void)list;
+  (void)data;
+  if (c == '/') {
+    *out_next_state = (tokenizer_state){.state = TS_SINGLE_LINE_COMMENT};
+  } else if (c == '*') {
+    *out_next_state = (tokenizer_state){.state = TS_MULTI_LINE_COMMENT};
+  } else {
+    *out_next_state = (tokenizer_state){.state = TS_ERROR};
+  }
+  return false;
+}
+
+static err_t ts_single_line_comment(char c, arraybuffer *list,
+                                    tokenizer_state_data *data,
+                                    tokenizer_state *out_next_state) {
+  (void)list;
+  (void)data;
+  if (c == '\n') {
+    *out_next_state = (tokenizer_state){.state = TS_DEFAULT};
+  } else if (c == '\0') {
+    *out_next_state = (tokenizer_state){.state = TS_ERROR};
+  } else {
+    *out_next_state = (tokenizer_state){.state = TS_SINGLE_LINE_COMMENT};
+  }
+  return false;
+}
+
+static err_t ts_multi_line_comment(char c, arraybuffer *list,
+                                   tokenizer_state_data *data,
+                                   tokenizer_state *out_next_state) {
+  (void)list;
+  (void)data;
+  if (c == '*') {
+    *out_next_state = (tokenizer_state){.state = TS_MULTI_LINE_COMMENT_STAR};
+  } else if (c == '\0') {
+    *out_next_state = (tokenizer_state){.state = TS_ERROR};
+  } else {
+    *out_next_state = (tokenizer_state){.state = TS_MULTI_LINE_COMMENT};
+  }
+  return false;
+}
+
+static err_t ts_multi_line_comment_star(char c, arraybuffer *list,
+                                        tokenizer_state_data *data,
+                                        tokenizer_state *out_next_state) {
+  (void)list;
+  (void)data;
+  if (c == '/') {
+    *out_next_state = (tokenizer_state){.state = TS_DEFAULT};
+  } else if (c == '\0') {
+    *out_next_state = (tokenizer_state){.state = TS_ERROR};
+  } else {
+    *out_next_state = (tokenizer_state){.state = TS_MULTI_LINE_COMMENT};
+  }
+  return false;
+}
+
 static const tokenizer_state_function state_functions[] = {
-    ts_default,          ts_keyword_t,       ts_keyword_tr,
-    ts_keyword_tru,      ts_keyword_f,       ts_keyword_fa,
-    ts_keyword_fal,      ts_keyword_fals,    ts_keyword_n,
-    ts_keyword_nu,       ts_keyword_nul,     ts_string_any,
-    ts_string_backslash, ts_string_x0,       ts_string_x1,
-    ts_number_sign,      ts_number_zero,     ts_number_integer,
-    ts_number_dot,       ts_number_fraction, ts_number_e,
-    ts_number_e_sign,    ts_number_e_digit,
+    ts_default,
+    ts_keyword_t,
+    ts_keyword_tr,
+    ts_keyword_tru,
+    ts_keyword_f,
+    ts_keyword_fa,
+    ts_keyword_fal,
+    ts_keyword_fals,
+    ts_keyword_n,
+    ts_keyword_nu,
+    ts_keyword_nul,
+    ts_string_any,
+    ts_string_backslash,
+    ts_string_x0,
+    ts_string_x1,
+    ts_number_sign,
+    ts_number_zero,
+    ts_number_integer,
+    ts_number_dot,
+    ts_number_fraction,
+    ts_number_e,
+    ts_number_e_sign,
+    ts_number_e_digit,
+    ts_slash,
+    ts_single_line_comment,
+    ts_multi_line_comment,
+    ts_multi_line_comment_star,
 };
 
 static void tokenize_free(arraybuffer *tokens) {
@@ -728,6 +808,9 @@ static err_t parse_array(arraybuffer *list, size_t *index, jsonc_array *out,
   }
   while (token_get(list, *index).type == TT_COMMA) {
     (*index)++;
+    if (token_get(list, *index).type == TT_RIGHT_BRACKET) {
+      break;
+    }
     jsonc_value value;
     if (parse_value(list, index, &value, &is_error)) {
       goto fail;
@@ -822,6 +905,9 @@ static err_t parse_object(arraybuffer *list, size_t *index, jsonc_object *out,
   }
   while (token_get(list, *index).type == TT_COMMA) {
     (*index)++;
+    if (token_get(list, *index).type == TT_RIGHT_BRACE) {
+      break;
+    }
     if (token_get(list, *index).type != TT_STRING) {
       goto error;
     }
