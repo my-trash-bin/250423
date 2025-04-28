@@ -8,6 +8,6 @@ cmake -B builddir -DCMAKE_INSTALL_PREFIX=builddir/out test
 cmake --build builddir --config Debug
 cmake --install builddir --config Debug
 
-while IFS= read -r line; do
+ls test/data/ | grep -E '\.json$' | sort | while IFS= read -r line; do
   builddir/out/bin/jsonc test/data/$line | tr -d '\r' | diff test/data/$line.txt -
-done < <(ls test/data/ | grep -E '\.json$' | sort)
+done
