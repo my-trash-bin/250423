@@ -132,10 +132,13 @@ typedef struct token {
 #define TS_SINGLE_LINE_COMMENT 26
 #define TS_MULTI_LINE_COMMENT 27
 #define TS_MULTI_LINE_COMMENT_STAR 28
+#define TS_STRING_SURROGATE 29
+#define TS_STRING_SURROGATE_U 30
 
 typedef struct tokenizer_state_string {
   arraybuffer *stringbuilder;
   uint32_t u;
+  uint32_t high_surrogate;
 } tokenizer_state_string;
 
 typedef struct tokenizer_state_number {
@@ -308,6 +311,8 @@ static err_t ts_default(char c, arraybuffer *list, tokenizer_state_data *data,
       return true;
     }
     out_next_state->data.string.stringbuilder = stringbuilder;
+    out_next_state->data.string.u = 0;
+    out_next_state->data.string.high_surrogate = 0;
     out_next_state->state = TS_STRING_ANY;
     return false;
   }
@@ -468,6 +473,34 @@ static err_t ts_string_backslash(char c, arraybuffer *list,
   return false;
 }
 
+static err_t ts_string_surrogate(char c, arraybuffer *list,
+                                 tokenizer_state_data *data,
+                                 tokenizer_state *out_next_state) {
+  (void)list;
+  if (c == '\\') {
+    *out_next_state =
+        (tokenizer_state){.state = TS_STRING_SURROGATE_U, .data = *data};
+  } else {
+    arraybuffer_destroy(data->string.stringbuilder);
+    *out_next_state = (tokenizer_state){.state = TS_ERROR};
+  }
+  return false;
+}
+
+static err_t ts_string_surrogate_u(char c, arraybuffer *list,
+                                   tokenizer_state_data *data,
+                                   tokenizer_state *out_next_state) {
+  (void)list;
+  if (c == 'u') {
+    data->string.u = 0;
+    *out_next_state = (tokenizer_state){.state = TS_STRING_U0, .data = *data};
+  } else {
+    arraybuffer_destroy(data->string.stringbuilder);
+    *out_next_state = (tokenizer_state){.state = TS_ERROR};
+  }
+  return false;
+}
+
 static unsigned char from_hex(char c) {
   if ('0' <= c && c <= '9')
     return c - '0';
@@ -566,12 +599,39 @@ static err_t ts_string_u3(char c, arraybuffer *list, tokenizer_state_data *data,
     return false;
   }
   data->string.u = (data->string.u << 4) | value;
-  if (data->string.u > 0x10FFFF ||
-      (data->string.u >= 0xD800 && data->string.u <= 0xDFFF)) {
+
+  if (data->string.high_surrogate) {
+    if (data->string.u < 0xDC00 || data->string.u > 0xDFFF) {
+      arraybuffer_destroy(data->string.stringbuilder);
+      *out_next_state = (tokenizer_state){.state = TS_ERROR};
+      return false;
+    }
+    uint32_t codepoint = 0x10000 +
+                         ((data->string.high_surrogate - 0xD800) << 10) +
+                         (data->string.u - 0xDC00);
+    data->string.high_surrogate = 0;
+    if (utf8_append(data->string.stringbuilder, codepoint)) {
+      arraybuffer_destroy(data->string.stringbuilder);
+      return true;
+    }
+    *out_next_state =
+        (tokenizer_state){.state = TS_STRING_ANY, .data = *data};
+    return false;
+  }
+
+  if (data->string.u >= 0xD800 && data->string.u <= 0xDBFF) {
+    data->string.high_surrogate = data->string.u;
+    *out_next_state =
+        (tokenizer_state){.state = TS_STRING_SURROGATE, .data = *data};
+    return false;
+  }
+
+  if (data->string.u >= 0xD800 && data->string.u <= 0xDFFF) {
     arraybuffer_destroy(data->string.stringbuilder);
     *out_next_state = (tokenizer_state){.state = TS_ERROR};
     return false;
   }
+
   if (utf8_append(data->string.stringbuilder, data->string.u)) {
     arraybuffer_destroy(data->string.stringbuilder);
     return true;
@@ -814,6 +874,8 @@ static const tokenizer_state_function state_functions[] = {
     ts_single_line_comment,
     ts_multi_line_comment,
     ts_multi_line_comment_star,
+    ts_string_surrogate,
+    ts_string_surrogate_u,
 };
 
 static void tokenize_free(arraybuffer *tokens) {
