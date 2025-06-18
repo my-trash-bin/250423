@@ -6,6 +6,7 @@
 
 #include <cctype>
 #include <climits>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 
@@ -14,6 +15,7 @@
 #include <ctype.h>
 #include <limits.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -114,25 +116,26 @@ typedef struct token {
 #define TS_KEYWORD_NUL 10
 #define TS_STRING_ANY 11
 #define TS_STRING_BACKSLASH 12
-// TODO: support unicode escape sequences and utf-8mb4 instead of \xXX
-#define TS_STRING_X0 13
-#define TS_STRING_X1 14
-#define TS_NUMBER_SIGN 15
-#define TS_NUMBER_ZERO 16
-#define TS_NUMBER_INTEGER 17
-#define TS_NUMBER_DOT 18
-#define TS_NUMBER_FRACTION 19
-#define TS_NUMBER_E 20
-#define TS_NUMBER_E_SIGN 21
-#define TS_NUMBER_E_DIGIT 22
-#define TS_SLASH 23
-#define TS_SINGLE_LINE_COMMENT 24
-#define TS_MULTI_LINE_COMMENT 25
-#define TS_MULTI_LINE_COMMENT_STAR 26
+#define TS_STRING_U0 13
+#define TS_STRING_U1 14
+#define TS_STRING_U2 15
+#define TS_STRING_U3 16
+#define TS_NUMBER_SIGN 17
+#define TS_NUMBER_ZERO 18
+#define TS_NUMBER_INTEGER 19
+#define TS_NUMBER_DOT 20
+#define TS_NUMBER_FRACTION 21
+#define TS_NUMBER_E 22
+#define TS_NUMBER_E_SIGN 23
+#define TS_NUMBER_E_DIGIT 24
+#define TS_SLASH 25
+#define TS_SINGLE_LINE_COMMENT 26
+#define TS_MULTI_LINE_COMMENT 27
+#define TS_MULTI_LINE_COMMENT_STAR 28
 
 typedef struct tokenizer_state_string {
   arraybuffer *stringbuilder;
-  unsigned char x;
+  uint32_t u;
 } tokenizer_state_string;
 
 typedef struct tokenizer_state_number {
@@ -181,9 +184,51 @@ static err_t add_number_token(arraybuffer *list,
   return false;
 }
 
+static bool is_valid_utf8(const unsigned char *s, size_t length) {
+  for (size_t i = 0; i < length; i++) {
+    const unsigned char c = s[i];
+    if (c <= 0x7F) {
+      continue;
+    } else if (c >= 0xC2 && c <= 0xDF) {
+      if (i + 1 >= length || (s[i + 1] & 0xC0) != 0x80)
+        return false;
+      i += 1;
+    } else if (c == 0xE0) {
+      if (i + 2 >= length || (s[i + 1] & 0xE0) != 0xA0 ||
+          (s[i + 2] & 0xC0) != 0x80)
+        return false;
+      i += 2;
+    } else if (c >= 0xE1 && c <= 0xEF) {
+      if (i + 2 >= length || (s[i + 1] & 0xC0) != 0x80 ||
+          (s[i + 2] & 0xC0) != 0x80)
+        return false;
+      i += 2;
+    } else if (c == 0xF0) {
+      if (i + 3 >= length || (s[i + 1] & 0xF0) != 0x90 ||
+          (s[i + 2] & 0xC0) != 0x80 || (s[i + 3] & 0xC0) != 0x80)
+        return false;
+      i += 3;
+    } else if (c >= 0xF1 && c <= 0xF3) {
+      if (i + 3 >= length || (s[i + 1] & 0xC0) != 0x80 ||
+          (s[i + 2] & 0xC0) != 0x80 || (s[i + 3] & 0xC0) != 0x80)
+        return false;
+      i += 3;
+    } else if (c == 0xF4) {
+      if (i + 3 >= length || (s[i + 1] & 0xF0) != 0x80 ||
+          (s[i + 2] & 0xC0) != 0x80 || (s[i + 3] & 0xC0) != 0x80)
+        return false;
+      i += 3;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
 static err_t add_string_token(arraybuffer *list,
                               /* always-consumed */
-                              tokenizer_state_string *state) {
+                              tokenizer_state_string *state,
+                              tokenizer_state *out_next_state) {
   static const char null_byte = '\0';
   err_t result = true;
   if (arraybuffer_push(state->stringbuilder, &null_byte)) {
@@ -193,13 +238,20 @@ static err_t add_string_token(arraybuffer *list,
   if (!string) {
     goto cleanup;
   }
+  const size_t len = strlen(string);
+  if (!is_valid_utf8((const unsigned char *)string, len)) {
+    free(string);
+    *out_next_state = (tokenizer_state){.state = TS_ERROR};
+    result = false;
+    goto cleanup;
+  }
   const token current = {.type = TT_STRING, .value.string = string};
   if (arraybuffer_push(list, &current)) {
     free(string);
     goto cleanup;
   }
+  *out_next_state = (tokenizer_state){.state = TS_DEFAULT};
   result = false;
-  goto cleanup;
 
 cleanup:
   arraybuffer_destroy(state->stringbuilder);
@@ -361,13 +413,12 @@ static err_t ts_string_any(char c, arraybuffer *list,
                            tokenizer_state *out_next_state) {
   (void)data;
   if (c == '"') {
-    *out_next_state = (tokenizer_state){.state = TS_DEFAULT};
-    return add_string_token(list, &data->string);
+    return add_string_token(list, &data->string, out_next_state);
   } else if (c == '\\') {
     *out_next_state =
         (tokenizer_state){.state = TS_STRING_BACKSLASH, .data = *data};
     return false;
-  } else if (iscntrl(c)) {
+  } else if ((unsigned char)c <= 0x7F && iscntrl((unsigned char)c)) {
     *out_next_state = (tokenizer_state){.state = TS_ERROR};
     return false;
   }
@@ -383,8 +434,9 @@ static err_t ts_string_backslash(char c, arraybuffer *list,
                                  tokenizer_state_data *data,
                                  tokenizer_state *out_next_state) {
   (void)list;
-  if (c == 'x') {
-    *out_next_state = (tokenizer_state){.state = TS_STRING_X0, .data = *data};
+  if (c == 'u') {
+    data->string.u = 0;
+    *out_next_state = (tokenizer_state){.state = TS_STRING_U0, .data = *data};
     return false;
   }
   char next;
@@ -426,7 +478,7 @@ static unsigned char from_hex(char c) {
   return -1;
 }
 
-static err_t ts_string_x0(char c, arraybuffer *list, tokenizer_state_data *data,
+static err_t ts_string_u0(char c, arraybuffer *list, tokenizer_state_data *data,
                           tokenizer_state *out_next_state) {
   (void)list;
 
@@ -436,12 +488,12 @@ static err_t ts_string_x0(char c, arraybuffer *list, tokenizer_state_data *data,
     *out_next_state = (tokenizer_state){.state = TS_ERROR};
     return false;
   }
-  *out_next_state = (tokenizer_state){.state = TS_STRING_X1, .data = *data};
-  data->string.x = value;
+  data->string.u = value;
+  *out_next_state = (tokenizer_state){.state = TS_STRING_U1, .data = *data};
   return false;
 }
 
-static err_t ts_string_x1(char c, arraybuffer *list, tokenizer_state_data *data,
+static err_t ts_string_u1(char c, arraybuffer *list, tokenizer_state_data *data,
                           tokenizer_state *out_next_state) {
   (void)list;
 
@@ -451,12 +503,80 @@ static err_t ts_string_x1(char c, arraybuffer *list, tokenizer_state_data *data,
     *out_next_state = (tokenizer_state){.state = TS_ERROR};
     return false;
   }
-  *out_next_state = (tokenizer_state){.state = TS_STRING_ANY, .data = *data};
-  const int tmp = ((data->string.x) << CHAR_BIT) | value;
-  if (arraybuffer_push(data->string.stringbuilder, &tmp)) {
+  data->string.u = (data->string.u << 4) | value;
+  *out_next_state = (tokenizer_state){.state = TS_STRING_U2, .data = *data};
+  return false;
+}
+
+static err_t ts_string_u2(char c, arraybuffer *list, tokenizer_state_data *data,
+                          tokenizer_state *out_next_state) {
+  (void)list;
+
+  const unsigned char value = from_hex(c);
+  if (value == (unsigned char)-1) {
+    arraybuffer_destroy(data->string.stringbuilder);
+    *out_next_state = (tokenizer_state){.state = TS_ERROR};
+    return false;
+  }
+  data->string.u = (data->string.u << 4) | value;
+  *out_next_state = (tokenizer_state){.state = TS_STRING_U3, .data = *data};
+  return false;
+}
+
+static err_t utf8_append(arraybuffer *sb, uint32_t codepoint) {
+  char bytes[4];
+  size_t len = 0;
+  if (codepoint <= 0x7F) {
+    bytes[0] = codepoint & 0x7F;
+    len = 1;
+  } else if (codepoint <= 0x7FF) {
+    bytes[0] = 0xC0 | (codepoint >> 6);
+    bytes[1] = 0x80 | (codepoint & 0x3F);
+    len = 2;
+  } else if (codepoint <= 0xFFFF) {
+    bytes[0] = 0xE0 | (codepoint >> 12);
+    bytes[1] = 0x80 | ((codepoint >> 6) & 0x3F);
+    bytes[2] = 0x80 | (codepoint & 0x3F);
+    len = 3;
+  } else if (codepoint <= 0x10FFFF) {
+    bytes[0] = 0xF0 | (codepoint >> 18);
+    bytes[1] = 0x80 | ((codepoint >> 12) & 0x3F);
+    bytes[2] = 0x80 | ((codepoint >> 6) & 0x3F);
+    bytes[3] = 0x80 | (codepoint & 0x3F);
+    len = 4;
+  } else {
+    return true;
+  }
+  for (size_t i = 0; i < len; i++) {
+    if (arraybuffer_push(sb, &bytes[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static err_t ts_string_u3(char c, arraybuffer *list, tokenizer_state_data *data,
+                          tokenizer_state *out_next_state) {
+  (void)list;
+
+  const unsigned char value = from_hex(c);
+  if (value == (unsigned char)-1) {
+    arraybuffer_destroy(data->string.stringbuilder);
+    *out_next_state = (tokenizer_state){.state = TS_ERROR};
+    return false;
+  }
+  data->string.u = (data->string.u << 4) | value;
+  if (data->string.u > 0x10FFFF ||
+      (data->string.u >= 0xD800 && data->string.u <= 0xDFFF)) {
+    arraybuffer_destroy(data->string.stringbuilder);
+    *out_next_state = (tokenizer_state){.state = TS_ERROR};
+    return false;
+  }
+  if (utf8_append(data->string.stringbuilder, data->string.u)) {
     arraybuffer_destroy(data->string.stringbuilder);
     return true;
   }
+  *out_next_state = (tokenizer_state){.state = TS_STRING_ANY, .data = *data};
   return false;
 }
 
@@ -678,8 +798,10 @@ static const tokenizer_state_function state_functions[] = {
     ts_keyword_nul,
     ts_string_any,
     ts_string_backslash,
-    ts_string_x0,
-    ts_string_x1,
+    ts_string_u0,
+    ts_string_u1,
+    ts_string_u2,
+    ts_string_u3,
     ts_number_sign,
     ts_number_zero,
     ts_number_integer,
