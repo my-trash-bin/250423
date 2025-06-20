@@ -614,8 +614,7 @@ static err_t ts_string_u3(char c, arraybuffer *list, tokenizer_state_data *data,
       arraybuffer_destroy(data->string.stringbuilder);
       return true;
     }
-    *out_next_state =
-        (tokenizer_state){.state = TS_STRING_ANY, .data = *data};
+    *out_next_state = (tokenizer_state){.state = TS_STRING_ANY, .data = *data};
     return false;
   }
 
